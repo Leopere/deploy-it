@@ -10,7 +10,7 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, ARM64, leopere, local, public-safe]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
@@ -19,7 +19,7 @@ jobs:
       - run: go test -race ./...
   release:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, ARM64, leopere, local, public-safe]
     strategy:
       matrix:
         include:
@@ -48,7 +48,7 @@ jobs:
           path: dist/*.tar.gz
   publish:
     needs: release
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, ARM64, leopere, local, public-safe]
     permissions:
       contents: write
     steps:

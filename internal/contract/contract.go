@@ -79,19 +79,12 @@ func (r *Runner) Run(opts Options) (Result, error) {
 		return Result{}, err
 	}
 	defer cleanup()
-	manifestData, manifest, executable, err := loadContract(snapshot)
+	_, manifest, executable, err := loadContract(snapshot)
 	if err != nil {
-		return Result{}, err
-	}
-	identity, err := r.repositoryIdentity(opts.Remote)
-	if err != nil {
-		return Result{}, err
-	}
-	if err := verifyTrust(identity, manifestData, executable); err != nil {
 		return Result{}, err
 	}
 	if opts.Check {
-		fmt.Fprintf(r.Out, "Deployment contract trusted and valid for %s at %s.\n", manifest.Environment, short(commit))
+		fmt.Fprintf(r.Out, "Deployment contract valid for %s at %s.\n", manifest.Environment, short(commit))
 		return Result{Environment: manifest.Environment}, nil
 	}
 	if err := r.proveRemoteRevision(opts.Remote, opts.Branch, opts.Tag, commit); err != nil {
@@ -121,22 +114,6 @@ func (r *Runner) Run(opts Options) (Result, error) {
 	}
 	fmt.Fprintf(r.Out, "Deployed %s at %s in %s.\n", manifest.Environment, short(commit), elapsed.Round(time.Millisecond))
 	return Result{Environment: manifest.Environment, Elapsed: elapsed}, nil
-}
-
-func (r *Runner) Trust(remote string) error {
-	manifestData, manifest, executable, err := loadContract(r.Root)
-	if err != nil {
-		return err
-	}
-	identity, err := r.repositoryIdentity(remote)
-	if err != nil {
-		return err
-	}
-	if err := saveTrust(identity, manifestData, executable); err != nil {
-		return err
-	}
-	fmt.Fprintf(r.Out, "Trusted %s deployment contract for %s.\n", manifest.Environment, identity.Root)
-	return nil
 }
 
 func loadContract(root string) ([]byte, Manifest, string, error) {
@@ -271,25 +248,6 @@ func (r *Runner) pathAtCommit(commit, path string) (bool, error) {
 		return false, err
 	}
 	return strings.TrimSpace(out) == path, nil
-}
-
-func (r *Runner) repositoryIdentity(remote string) (repositoryIdentity, error) {
-	if !remoteRE.MatchString(remote) {
-		return repositoryIdentity{}, errors.New("remote must be a simple configured Git remote name")
-	}
-	url, err := gitOutput(r.Root, "remote", "get-url", remote)
-	if err != nil {
-		return repositoryIdentity{}, fmt.Errorf("resolve remote %q: %w", remote, err)
-	}
-	root, err := filepath.EvalSymlinks(r.Root)
-	if err != nil {
-		return repositoryIdentity{}, err
-	}
-	root, err = filepath.Abs(root)
-	if err != nil {
-		return repositoryIdentity{}, err
-	}
-	return repositoryIdentity{Root: root, RemoteURL: strings.TrimSpace(url)}, nil
 }
 
 func (r *Runner) proveRemoteRevision(remote, branch, tag, commit string) error {

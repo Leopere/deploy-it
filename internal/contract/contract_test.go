@@ -21,7 +21,7 @@ func TestMissingManifestSkips(t *testing.T) {
 	}
 }
 
-func TestExecutesTrustedRemoteRevisionFromPrivateSnapshot(t *testing.T) {
+func TestExecutesRemoteRevisionFromPrivateSnapshot(t *testing.T) {
 	repo := newRepo(t, true)
 	record := filepath.Join(t.TempDir(), "record")
 	t.Setenv("DEPLOY_TEST_RECORD", record)
@@ -31,7 +31,7 @@ func TestExecutesTrustedRemoteRevisionFromPrivateSnapshot(t *testing.T) {
 	write(t, filepath.Join(repo, "deploy.sh"), script, 0o755)
 	commitAndPush(t, repo, "contract", "v2026.08.10.1")
 	commit := output(t, repo, "rev-parse", "HEAD")
-	runner, out := trustedRunner(t, repo)
+	runner, out := openRunner(t, repo)
 	result, err := runner.Run(Options{Commit: commit, Branch: "main", Tag: "v2026.08.10.1", Remote: "origin"})
 	if err != nil {
 		t.Fatal(err)
@@ -58,29 +58,32 @@ func TestRejectsUnpushedCommit(t *testing.T) {
 	git(t, repo, "add", ManifestName, "deploy.sh")
 	git(t, repo, "commit", "-m", "unpushed contract")
 	commit := output(t, repo, "rev-parse", "HEAD")
-	runner, _ := trustedRunner(t, repo)
+	runner, _ := openRunner(t, repo)
 	_, err := runner.Run(Options{Commit: commit, Branch: "main", Remote: "origin"})
 	if err == nil || !strings.Contains(err.Error(), "pushed remote branch") {
 		t.Fatalf("error=%v", err)
 	}
 }
 
-func TestUntrustedContractDoesNotExecute(t *testing.T) {
+func TestMissingTrustStoreDoesNotBlockDeployment(t *testing.T) {
 	repo := newRepo(t, true)
 	record := filepath.Join(t.TempDir(), "record")
 	t.Setenv("DEPLOY_TEST_RECORD", record)
 	write(t, filepath.Join(repo, ManifestName), manifest, 0o644)
-	write(t, filepath.Join(repo, "deploy.sh"), "#!/bin/sh\ntouch \"$DEPLOY_TEST_RECORD\"\n", 0o755)
+	write(t, filepath.Join(repo, "deploy.sh"), "#!/bin/sh\nprintf deployed > \"$DEPLOY_TEST_RECORD\"\n", 0o755)
 	commitAndPush(t, repo, "contract", "")
 	commit := output(t, repo, "rev-parse", "HEAD")
 	t.Setenv("DEPLOY_IT_TRUST_FILE", filepath.Join(t.TempDir(), "trust.json"))
 	runner, _ := Open(repo, &bytes.Buffer{}, &bytes.Buffer{})
-	_, err := runner.Run(Options{Commit: commit, Branch: "main", Remote: "origin"})
-	if err == nil || !strings.Contains(err.Error(), "not locally trusted") {
-		t.Fatalf("error=%v", err)
+	if _, err := runner.Run(Options{Commit: commit, Branch: "main", Remote: "origin"}); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(record); !os.IsNotExist(err) {
-		t.Fatal("untrusted deployment executed")
+	data, err := os.ReadFile(record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "deployed" {
+		t.Fatalf("deployment output=%q", data)
 	}
 }
 
@@ -92,7 +95,7 @@ func TestSnapshotIgnoresDeletedOrModifiedWorktreeContract(t *testing.T) {
 	write(t, filepath.Join(repo, "deploy.sh"), "#!/bin/sh\nprintf shipped > \"$DEPLOY_TEST_RECORD\"\n", 0o755)
 	commitAndPush(t, repo, "contract", "")
 	commit := output(t, repo, "rev-parse", "HEAD")
-	runner, _ := trustedRunner(t, repo)
+	runner, _ := openRunner(t, repo)
 	if err := os.Remove(filepath.Join(repo, ManifestName)); err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +117,7 @@ func TestCheckDoesNotExecuteAndCommandFailurePropagates(t *testing.T) {
 	write(t, filepath.Join(repo, "deploy.sh"), "#!/bin/sh\ntouch \"$DEPLOY_TEST_RECORD\"\nexit 7\n", 0o755)
 	commitAndPush(t, repo, "contract", "")
 	commit := output(t, repo, "rev-parse", "HEAD")
-	runner, _ := trustedRunner(t, repo)
+	runner, _ := openRunner(t, repo)
 	if _, err := runner.Run(Options{Check: true, Remote: "origin"}); err != nil {
 		t.Fatal(err)
 	}
@@ -144,32 +147,11 @@ func TestManifestStrictnessAndRecursionProtection(t *testing.T) {
 	}
 }
 
-func TestTrustChangesWhenExecutableChanges(t *testing.T) {
-	repo := newRepo(t, false)
-	t.Setenv("DEPLOY_TEST_RECORD", filepath.Join(t.TempDir(), "record"))
-	write(t, filepath.Join(repo, ManifestName), manifest, 0o644)
-	write(t, filepath.Join(repo, "deploy.sh"), "#!/bin/sh\nexit 0\n", 0o755)
-	runner, _ := trustedRunner(t, repo)
-	write(t, filepath.Join(repo, "deploy.sh"), "#!/bin/sh\nexit 8\n", 0o755)
-	data, _, executable, err := loadContract(repo)
-	if err != nil {
-		t.Fatal(err)
-	}
-	identity, _ := runner.repositoryIdentity("origin")
-	if err := verifyTrust(identity, data, executable); err == nil {
-		t.Fatal("changed executable retained trust")
-	}
-}
-
-func trustedRunner(t *testing.T, repo string) (*Runner, *bytes.Buffer) {
+func openRunner(t *testing.T, repo string) (*Runner, *bytes.Buffer) {
 	t.Helper()
-	t.Setenv("DEPLOY_IT_TRUST_FILE", filepath.Join(t.TempDir(), "trust.json"))
 	var out bytes.Buffer
 	runner, err := Open(repo, &out, &out)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := runner.Trust("origin"); err != nil {
 		t.Fatal(err)
 	}
 	return runner, &out

@@ -14,4 +14,7 @@ func TestEmbeddedSkillContract(t *testing.T) {
 	if !strings.Contains(OpenAIYAML, "$deploy-it") {
 		t.Fatal("default prompt does not invoke skill")
 	}
+	if strings.Contains(SkillMD, "deploy-it trust") || !strings.Contains(SkillMD, "no machine-local trust gate") {
+		t.Fatal("embedded skill still requires local trust")
+	}
 }
