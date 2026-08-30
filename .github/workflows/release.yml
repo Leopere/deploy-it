@@ -57,6 +57,10 @@ jobs:
           pattern: deploy-it-*
           merge-multiple: true
           path: dist
+      - name: Install GitHub CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gh
       - name: Checksums
         working-directory: dist
         run: sha256sum *.tar.gz > checksums.txt
