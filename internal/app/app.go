@@ -14,6 +14,7 @@ import (
 const usage = `deploy-it executes an explicit repository deployment contract.
 
 Usage:
+  deploy-it
   deploy-it --commit sha --branch branch [--tag tag] [--remote origin]
   deploy-it check [--commit sha] [--remote origin]
   deploy-it install [--skills-only]
@@ -63,7 +64,14 @@ func runContract(args []string, check bool, out, errOut io.Writer) error {
 	if err != nil {
 		return err
 	}
-	result, err := runner.Run(contract.Options{Commit: *commit, Branch: *branch, Tag: *tag, Remote: *remote, Check: check})
+	opts := contract.Options{Commit: *commit, Branch: *branch, Tag: *tag, Remote: *remote, Check: check}
+	if !check && len(args) == 0 {
+		opts, err = runner.ShippedHEADOptions()
+		if err != nil {
+			return err
+		}
+	}
+	result, err := runner.Run(opts)
 	if err != nil {
 		return err
 	}

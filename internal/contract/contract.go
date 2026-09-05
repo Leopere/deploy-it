@@ -116,6 +116,51 @@ func (r *Runner) Run(opts Options) (Result, error) {
 	return Result{Environment: manifest.Environment, Elapsed: elapsed}, nil
 }
 
+// ShippedHEADOptions resolves the only safe implicit deployment target: a clean
+// checked-out branch whose HEAD is exactly present on its configured remote and
+// has one local release tag pointing at it. Run still proves the remote refs
+// immediately before executing the contract.
+func (r *Runner) ShippedHEADOptions() (Options, error) {
+	status, err := gitOutput(r.Root, "status", "--porcelain=v1", "--untracked-files=all")
+	if err != nil {
+		return Options{}, err
+	}
+	if strings.TrimSpace(status) != "" {
+		return Options{}, errors.New("implicit deployment requires a clean worktree")
+	}
+
+	commit, err := r.resolveCommit("", false)
+	if err != nil {
+		return Options{}, err
+	}
+	branch, err := gitOutput(r.Root, "symbolic-ref", "--quiet", "--short", "HEAD")
+	if err != nil || strings.TrimSpace(branch) == "" {
+		return Options{}, errors.New("implicit deployment requires HEAD checked out on a branch")
+	}
+	branch = strings.TrimSpace(branch)
+	remote, err := gitOutput(r.Root, "config", "--get", "branch."+branch+".remote")
+	if err != nil || !remoteRE.MatchString(strings.TrimSpace(remote)) {
+		return Options{}, errors.New("implicit deployment requires a configured branch remote")
+	}
+
+	tags, err := gitOutput(r.Root, "tag", "--points-at", commit)
+	if err != nil {
+		return Options{}, err
+	}
+	values := strings.Fields(tags)
+	if len(values) == 0 {
+		return Options{}, errors.New("implicit deployment requires a release tag pointing at HEAD")
+	}
+	if len(values) != 1 {
+		return Options{}, errors.New("implicit deployment requires exactly one release tag pointing at HEAD")
+	}
+	if err := r.proveRemoteRevision(strings.TrimSpace(remote), branch, values[0], commit); err != nil {
+		return Options{}, err
+	}
+
+	return Options{Commit: commit, Branch: branch, Tag: values[0], Remote: strings.TrimSpace(remote)}, nil
+}
+
 func loadContract(root string) ([]byte, Manifest, string, error) {
 	manifestPath := filepath.Join(root, ManifestName)
 	info, err := os.Lstat(manifestPath)

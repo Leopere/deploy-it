@@ -65,6 +65,52 @@ func TestRejectsUnpushedCommit(t *testing.T) {
 	}
 }
 
+func TestShippedHEADOptionsResolvesExactTrackedRelease(t *testing.T) {
+	repo := newRepo(t, true)
+	write(t, filepath.Join(repo, ManifestName), manifest, 0o644)
+	write(t, filepath.Join(repo, "deploy.sh"), "#!/bin/sh\nexit 0\n", 0o755)
+	commitAndPush(t, repo, "contract", "v2026.08.10.1")
+	commit := output(t, repo, "rev-parse", "HEAD")
+	runner, _ := openRunner(t, repo)
+
+	opts, err := runner.ShippedHEADOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Commit != commit || opts.Branch != "main" || opts.Remote != "origin" || opts.Tag != "v2026.08.10.1" {
+		t.Fatalf("options=%#v", opts)
+	}
+}
+
+func TestShippedHEADOptionsRejectsUnsafeInference(t *testing.T) {
+	for name, prepare := range map[string]func(*testing.T, string){
+		"dirty worktree": func(t *testing.T, repo string) {
+			write(t, filepath.Join(repo, "local"), "change\n", 0o644)
+		},
+		"unpushed head": func(t *testing.T, repo string) {
+			write(t, filepath.Join(repo, "local"), "change\n", 0o644)
+			git(t, repo, "add", "local")
+			git(t, repo, "commit", "-m", "local")
+			git(t, repo, "tag", "v2026.08.10.2")
+		},
+		"ambiguous tags": func(t *testing.T, repo string) {
+			git(t, repo, "tag", "v2026.08.10.2")
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			repo := newRepo(t, true)
+			write(t, filepath.Join(repo, ManifestName), manifest, 0o644)
+			write(t, filepath.Join(repo, "deploy.sh"), "#!/bin/sh\nexit 0\n", 0o755)
+			commitAndPush(t, repo, "contract", "v2026.08.10.1")
+			prepare(t, repo)
+			runner, _ := openRunner(t, repo)
+			if _, err := runner.ShippedHEADOptions(); err == nil {
+				t.Fatal("unsafe implicit deployment target was accepted")
+			}
+		})
+	}
+}
+
 func TestMissingTrustStoreDoesNotBlockDeployment(t *testing.T) {
 	repo := newRepo(t, true)
 	record := filepath.Join(t.TempDir(), "record")
