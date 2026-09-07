@@ -3,11 +3,11 @@ package contract
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -17,13 +17,16 @@ type archiveSymlink struct {
 	target string
 }
 
-func materialize(repoRoot, commit string) (string, func(), error) {
+func materialize(ctx context.Context, repoRoot, commit, hardDeadlineMS string) (string, func(), error) {
+	if err := deadlineError(ctx); err != nil {
+		return "", nil, err
+	}
 	dir, err := os.MkdirTemp("", "deploy-it-snapshot-")
 	if err != nil {
 		return "", nil, err
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
-	cmd := exec.Command("git", "-C", repoRoot, "archive", "--format=tar", commit)
+	cmd := newBoundedCommand(ctx, "git", "-C", repoRoot, "archive", "--format=tar", commit)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cleanup()
@@ -31,19 +34,23 @@ func materialize(repoRoot, commit string) (string, func(), error) {
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "SHIP_IT_DEADLINE_UNIX_MS="+hardDeadlineMS)
 	if err := cmd.Start(); err != nil {
 		cleanup()
 		return "", nil, err
 	}
-	extractErr := extractArchive(dir, stdout)
+	extractErr := extractArchiveContext(ctx, dir, stdout)
 	if extractErr != nil {
-		_ = cmd.Process.Kill()
+		stopCommand(cmd)
 		_ = cmd.Wait()
 		cleanup()
 		return "", nil, extractErr
 	}
 	if err := cmd.Wait(); err != nil {
+		if deadlineError(ctx) != nil {
+			cleanup()
+			return "", nil, errDeploymentDeadline
+		}
 		cleanup()
 		return "", nil, fmt.Errorf("materialize shipped commit: %s: %w", strings.TrimSpace(stderr.String()), err)
 	}
@@ -51,9 +58,16 @@ func materialize(repoRoot, commit string) (string, func(), error) {
 }
 
 func extractArchive(root string, reader io.Reader) error {
+	return extractArchiveContext(context.Background(), root, reader)
+}
+
+func extractArchiveContext(ctx context.Context, root string, reader io.Reader) error {
 	tarReader := tar.NewReader(reader)
 	var symlinks []archiveSymlink
 	for {
+		if err := deadlineError(ctx); err != nil {
+			return err
+		}
 		header, err := tarReader.Next()
 		if errors.Is(err, io.EOF) {
 			break
@@ -84,7 +98,7 @@ func extractArchive(root string, reader io.Reader) error {
 			if err != nil {
 				return err
 			}
-			_, copyErr := io.Copy(file, tarReader)
+			_, copyErr := io.Copy(file, contextReader{ctx: ctx, reader: tarReader})
 			closeErr := file.Close()
 			if copyErr != nil {
 				return copyErr
@@ -110,6 +124,18 @@ func extractArchive(root string, reader io.Reader) error {
 		}
 	}
 	return nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(data []byte) (int, error) {
+	if err := deadlineError(r.ctx); err != nil {
+		return 0, err
+	}
+	return r.reader.Read(data)
 }
 
 func archivePath(root, name string) (string, string, error) {

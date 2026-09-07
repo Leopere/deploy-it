@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -30,6 +29,7 @@ type Manifest struct {
 	Environment    string   `json:"environment"`
 	Command        []string `json:"command"`
 	Env            []string `json:"env,omitempty"`
+	OptionalEnv    []string `json:"optional_env,omitempty"`
 	TimeoutSeconds int      `json:"timeout_seconds"`
 }
 
@@ -48,65 +48,95 @@ type Result struct {
 }
 
 type Runner struct {
-	Root string
-	Out  io.Writer
-	Err  io.Writer
+	Root   string
+	Out    io.Writer
+	Err    io.Writer
+	budget deploymentBudget
 }
 
 func Open(cwd string, out, errOut io.Writer) (*Runner, error) {
-	root, err := gitOutput(cwd, "rev-parse", "--show-toplevel")
+	budget, err := currentDeploymentBudget()
 	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := budget.context()
+	defer cancel()
+	root, err := gitOutput(ctx, cwd, "rev-parse", "--show-toplevel")
+	if err != nil {
+		if errors.Is(err, errDeploymentDeadline) {
+			return nil, err
+		}
 		return nil, errors.New("not inside a Git repository")
 	}
-	return &Runner{Root: strings.TrimSpace(root), Out: out, Err: errOut}, nil
+	return &Runner{Root: strings.TrimSpace(root), Out: out, Err: errOut, budget: budget}, nil
 }
 
 func (r *Runner) Run(opts Options) (Result, error) {
-	commit, err := r.resolveCommit(opts.Commit, !opts.Check)
+	ctx, cancel := r.budget.context()
+	defer cancel()
+	commit, err := r.resolveCommit(ctx, opts.Commit, !opts.Check)
 	if err != nil {
 		return Result{}, err
 	}
-	present, err := r.pathAtCommit(commit, ManifestName)
+	present, err := r.pathAtCommit(ctx, commit, ManifestName)
 	if err != nil {
 		return Result{}, err
 	}
 	if !present {
-		return Result{Skipped: true}, nil
+		return Result{}, fmt.Errorf("deployment requires %s in shipped commit", ManifestName)
 	}
 
-	snapshot, cleanup, err := materialize(r.Root, commit)
+	snapshot, cleanup, err := materialize(ctx, r.Root, commit, r.budget.hardMS)
 	if err != nil {
 		return Result{}, err
 	}
-	defer cleanup()
+	defer func() {
+		// Do not start potentially slow filesystem cleanup after the hard
+		// command budget has expired. The private temporary directory contains
+		// only the immutable archive and is left for the OS cleaner in that case.
+		if ctx.Err() == nil {
+			cleanup()
+		}
+	}()
 	_, manifest, executable, err := loadContract(snapshot)
 	if err != nil {
+		return Result{}, err
+	}
+	if err := deadlineError(ctx); err != nil {
 		return Result{}, err
 	}
 	if opts.Check {
 		fmt.Fprintf(r.Out, "Deployment contract valid for %s at %s.\n", manifest.Environment, short(commit))
 		return Result{Environment: manifest.Environment}, nil
 	}
-	if err := r.proveRemoteRevision(opts.Remote, opts.Branch, opts.Tag, commit); err != nil {
+	if err := r.proveRemoteRevision(ctx, opts.Remote, opts.Branch, opts.Tag, commit); err != nil {
 		return Result{}, err
 	}
-	environment, err := commandEnvironment(manifest, commit, opts)
+	environment, err := commandEnvironment(manifest, commit, opts, r.budget.hardMS)
 	if err != nil {
 		return Result{}, err
 	}
 
 	started := time.Now()
 	fmt.Fprintf(r.Out, "Deploying %s at %s.\n", manifest.Environment, short(commit))
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(manifest.TimeoutSeconds)*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, executable, manifest.Command[1:]...)
+	commandDeadline := r.budget.executes
+	manifestDeadline := time.Now().Add(time.Duration(manifest.TimeoutSeconds) * time.Second)
+	if manifestDeadline.Before(commandDeadline) {
+		commandDeadline = manifestDeadline
+	}
+	commandCtx, commandCancel := context.WithDeadline(ctx, commandDeadline)
+	defer commandCancel()
+	cmd := newBoundedCommand(commandCtx, executable, manifest.Command[1:]...)
 	cmd.Dir = snapshot
 	cmd.Stdout = r.Out
 	cmd.Stderr = r.Err
 	cmd.Env = environment
 	err = cmd.Run()
 	elapsed := time.Since(started)
-	if ctx.Err() == context.DeadlineExceeded {
+	if commandCtx.Err() == context.DeadlineExceeded {
+		if deadlineError(ctx) != nil {
+			return Result{}, fmt.Errorf("deployment command exceeded the total deploy-it deadline")
+		}
 		return Result{}, fmt.Errorf("deployment command exceeded its %s timeout", time.Duration(manifest.TimeoutSeconds)*time.Second)
 	}
 	if err != nil {
@@ -117,11 +147,13 @@ func (r *Runner) Run(opts Options) (Result, error) {
 }
 
 // ShippedHEADOptions resolves the only safe implicit deployment target: a clean
-// checked-out branch whose HEAD is exactly present on its configured remote and
-// has one local release tag pointing at it. Run still proves the remote refs
+// checked-out branch whose HEAD is exactly present at its configured push
+// destination. Tags are optional for explicit calls. Run proves the remote refs
 // immediately before executing the contract.
 func (r *Runner) ShippedHEADOptions() (Options, error) {
-	status, err := gitOutput(r.Root, "status", "--porcelain=v1", "--untracked-files=all")
+	ctx, cancel := r.budget.context()
+	defer cancel()
+	status, err := gitOutput(ctx, r.Root, "status", "--porcelain=v1", "--untracked-files=all")
 	if err != nil {
 		return Options{}, err
 	}
@@ -129,36 +161,47 @@ func (r *Runner) ShippedHEADOptions() (Options, error) {
 		return Options{}, errors.New("implicit deployment requires a clean worktree")
 	}
 
-	commit, err := r.resolveCommit("", false)
+	commit, err := r.resolveCommit(ctx, "", false)
 	if err != nil {
 		return Options{}, err
 	}
-	branch, err := gitOutput(r.Root, "symbolic-ref", "--quiet", "--short", "HEAD")
+	branch, err := gitOutput(ctx, r.Root, "symbolic-ref", "--quiet", "--short", "HEAD")
 	if err != nil || strings.TrimSpace(branch) == "" {
 		return Options{}, errors.New("implicit deployment requires HEAD checked out on a branch")
 	}
 	branch = strings.TrimSpace(branch)
-	remote, err := gitOutput(r.Root, "config", "--get", "branch."+branch+".remote")
-	if err != nil || !remoteRE.MatchString(strings.TrimSpace(remote)) {
-		return Options{}, errors.New("implicit deployment requires a configured branch remote")
-	}
-
-	tags, err := gitOutput(r.Root, "tag", "--points-at", commit)
+	destination, err := gitOutput(ctx, r.Root, "for-each-ref", "--format=%(push:remotename)%00%(push:remoteref)%00%(upstream:remotename)%00%(upstream:remoteref)", "refs/heads/"+branch)
 	if err != nil {
 		return Options{}, err
 	}
-	values := strings.Fields(tags)
-	if len(values) == 0 {
-		return Options{}, errors.New("implicit deployment requires a release tag pointing at HEAD")
+	parts := strings.Split(strings.TrimSpace(destination), "\x00")
+	if len(parts) == 4 && parts[1] == "" {
+		// Git leaves push:remoteref empty without an explicit push refspec.
+		mode, modeErr := gitOutput(ctx, r.Root, "config", "--get", "push.default")
+		if modeErr != nil {
+			mode = "simple"
+		}
+		switch strings.TrimSpace(mode) {
+		case "current", "matching":
+			parts[1] = "refs/heads/" + branch
+		case "upstream", "tracking":
+			if parts[0] == parts[2] {
+				parts[1] = parts[3]
+			}
+		case "simple", "":
+			if parts[0] != parts[2] || parts[3] == "refs/heads/"+branch {
+				parts[1] = "refs/heads/" + branch
+			}
+		}
 	}
-	if len(values) != 1 {
-		return Options{}, errors.New("implicit deployment requires exactly one release tag pointing at HEAD")
+	if len(parts) != 4 || !remoteRE.MatchString(parts[0]) || !strings.HasPrefix(parts[1], "refs/heads/") {
+		return Options{}, errors.New("implicit deployment requires a configured branch push destination")
 	}
-	if err := r.proveRemoteRevision(strings.TrimSpace(remote), branch, values[0], commit); err != nil {
+	opts := Options{Commit: commit, Branch: strings.TrimPrefix(parts[1], "refs/heads/"), Remote: parts[0]}
+	if err := r.proveRemoteRevision(ctx, opts.Remote, opts.Branch, "", commit); err != nil {
 		return Options{}, err
 	}
-
-	return Options{Commit: commit, Branch: branch, Tag: values[0], Remote: strings.TrimSpace(remote)}, nil
+	return opts, nil
 }
 
 func loadContract(root string) ([]byte, Manifest, string, error) {
@@ -212,11 +255,11 @@ func decodeManifest(data []byte) (Manifest, error) {
 			return Manifest{}, fmt.Errorf("invalid %s: command contains NUL", ManifestName)
 		}
 	}
-	if manifest.TimeoutSeconds < 1 || manifest.TimeoutSeconds > 3600 {
-		return Manifest{}, fmt.Errorf("invalid %s: timeout_seconds must be between 1 and 3600", ManifestName)
+	if manifest.TimeoutSeconds < 1 || manifest.TimeoutSeconds > int(maximumDeploymentDuration/time.Second) {
+		return Manifest{}, fmt.Errorf("invalid %s: timeout_seconds must be between 1 and %d", ManifestName, int(maximumDeploymentDuration/time.Second))
 	}
 	seen := map[string]bool{}
-	for _, name := range manifest.Env {
+	for _, name := range append(append([]string{}, manifest.Env...), manifest.OptionalEnv...) {
 		if !envNameRE.MatchString(name) || strings.HasPrefix(name, "DEPLOY_IT_") {
 			return Manifest{}, fmt.Errorf("invalid %s: invalid environment variable %q", ManifestName, name)
 		}
@@ -264,14 +307,14 @@ func validateExecutable(root, command string) (string, error) {
 	return path, nil
 }
 
-func (r *Runner) resolveCommit(explicit string, required bool) (string, error) {
+func (r *Runner) resolveCommit(ctx context.Context, explicit string, required bool) (string, error) {
 	commit := strings.TrimSpace(explicit)
 	if commit == "" && required {
 		return "", errors.New("deployment requires an explicit full commit ID from ship-it")
 	}
 	if commit == "" {
 		var err error
-		commit, err = gitOutput(r.Root, "rev-parse", "HEAD")
+		commit, err = gitOutput(ctx, r.Root, "rev-parse", "HEAD")
 		if err != nil {
 			return "", err
 		}
@@ -281,44 +324,59 @@ func (r *Runner) resolveCommit(explicit string, required bool) (string, error) {
 	if err != nil || (len(decoded) != 20 && len(decoded) != 32) {
 		return "", errors.New("commit must be a full hexadecimal Git object ID")
 	}
-	if _, err := gitOutput(r.Root, "cat-file", "-e", commit+"^{commit}"); err != nil {
+	if _, err := gitOutput(ctx, r.Root, "cat-file", "-e", commit+"^{commit}"); err != nil {
 		return "", errors.New("commit does not exist in this repository")
 	}
 	return commit, nil
 }
 
-func (r *Runner) pathAtCommit(commit, path string) (bool, error) {
-	out, err := gitOutput(r.Root, "ls-tree", "--name-only", commit, "--", path)
+func (r *Runner) pathAtCommit(ctx context.Context, commit, path string) (bool, error) {
+	out, err := gitOutput(ctx, r.Root, "ls-tree", "--name-only", commit, "--", path)
 	if err != nil {
 		return false, err
 	}
 	return strings.TrimSpace(out) == path, nil
 }
 
-func (r *Runner) proveRemoteRevision(remote, branch, tag, commit string) error {
+func (r *Runner) proveRemoteRevision(ctx context.Context, remote, branch, tag, commit string) error {
+	if err := deadlineError(ctx); err != nil {
+		return err
+	}
 	if !remoteRE.MatchString(remote) {
 		return errors.New("remote must be a simple configured Git remote name")
 	}
 	if strings.TrimSpace(branch) == "" || strings.HasPrefix(branch, "-") {
 		return errors.New("deployment requires the shipped branch")
 	}
-	if _, err := gitOutput(r.Root, "check-ref-format", "--branch", branch); err != nil {
+	if _, err := gitOutput(ctx, r.Root, "check-ref-format", "--branch", branch); err != nil {
 		return errors.New("invalid shipped branch")
 	}
 	branchRef := "refs/heads/" + branch
-	branchOut, err := gitOutput(r.Root, "ls-remote", "--exit-code", remote, branchRef)
-	if err != nil || !remoteOutputHas(branchOut, branchRef, commit) {
+	branchOut, err := gitOutput(ctx, r.Root, "ls-remote", "--exit-code", remote, branchRef)
+	if err != nil {
+		if deadlineError(ctx) != nil {
+			return errDeploymentDeadline
+		}
+		return errors.New("deployment commit is not the exact commit on the pushed remote branch")
+	}
+	if !remoteOutputHas(branchOut, branchRef, commit) {
 		return errors.New("deployment commit is not the exact commit on the pushed remote branch")
 	}
 	if tag == "" {
 		return nil
 	}
 	tagRef := "refs/tags/" + tag
-	if _, err := gitOutput(r.Root, "check-ref-format", tagRef); err != nil {
+	if _, err := gitOutput(ctx, r.Root, "check-ref-format", tagRef); err != nil {
 		return errors.New("invalid shipped tag")
 	}
-	tagOut, err := gitOutput(r.Root, "ls-remote", "--exit-code", remote, tagRef)
-	if err != nil || !remoteOutputHas(tagOut, tagRef, commit) {
+	tagOut, err := gitOutput(ctx, r.Root, "ls-remote", "--exit-code", remote, tagRef)
+	if err != nil {
+		if deadlineError(ctx) != nil {
+			return errDeploymentDeadline
+		}
+		return errors.New("deployment commit is not the exact commit at the pushed remote tag")
+	}
+	if !remoteOutputHas(tagOut, tagRef, commit) {
 		return errors.New("deployment commit is not the exact commit at the pushed remote tag")
 	}
 	return nil
@@ -334,11 +392,13 @@ func remoteOutputHas(output, ref, commit string) bool {
 	return false
 }
 
-func commandEnvironment(manifest Manifest, commit string, opts Options) ([]string, error) {
+func commandEnvironment(manifest Manifest, commit string, opts Options, hardDeadlineMS string) ([]string, error) {
 	allowed := []string{"PATH", "TMPDIR", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR"}
-	environment := make([]string, 0, len(allowed)+len(manifest.Env)+4)
+	allowed = append(allowed, manifest.Env...)
+	allowed = append(allowed, manifest.OptionalEnv...)
+	environment := make([]string, 0, len(allowed)+5)
 	seen := map[string]bool{}
-	for _, name := range append(allowed, manifest.Env...) {
+	for _, name := range allowed {
 		if seen[name] {
 			continue
 		}
@@ -357,6 +417,7 @@ func commandEnvironment(manifest Manifest, commit string, opts Options) ([]strin
 		"DEPLOY_IT_BRANCH="+opts.Branch,
 		"DEPLOY_IT_TAG="+opts.Tag,
 		"DEPLOY_IT_ENVIRONMENT="+manifest.Environment,
+		"SHIP_IT_DEADLINE_UNIX_MS="+hardDeadlineMS,
 	)
 	return environment, nil
 }
@@ -370,12 +431,18 @@ func contains(values []string, target string) bool {
 	return false
 }
 
-func gitOutput(cwd string, args ...string) (string, error) {
-	cmd := exec.Command("git", append([]string{"-C", cwd}, args...)...)
+func gitOutput(ctx context.Context, cwd string, args ...string) (string, error) {
+	if err := deadlineError(ctx); err != nil {
+		return "", err
+	}
+	cmd := newBoundedCommand(ctx, "git", append([]string{"-C", cwd}, args...)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	if err := cmd.Run(); err != nil {
+		if deadlineError(ctx) != nil {
+			return stdout.String(), errDeploymentDeadline
+		}
 		return stdout.String(), fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr.String()), err)
 	}
 	return stdout.String(), nil

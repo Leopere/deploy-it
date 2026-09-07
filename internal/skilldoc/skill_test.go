@@ -6,7 +6,7 @@ import (
 )
 
 func TestEmbeddedSkillContract(t *testing.T) {
-	for _, want := range []string{"name: deploy-it", "ship-it", ".deploy-it.json", "Never guess", "Do not rerun"} {
+	for _, want := range []string{"name: deploy-it", "ship-it", ".deploy-it.json", "Never guess", "After diagnosis, rerun", "needs no release tag", "A failed attempt alone"} {
 		if !strings.Contains(SkillMD, want) {
 			t.Fatalf("skill missing %q", want)
 		}

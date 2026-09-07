@@ -3,6 +3,7 @@ package contract
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -36,7 +37,7 @@ func TestExtractArchiveIgnoresPAXGlobalMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	root := t.TempDir()
+	root := testDir(t)
 	if err := extractArchive(root, bytes.NewReader(archive.Bytes())); err != nil {
 		t.Fatal(err)
 	}
@@ -49,5 +50,13 @@ func TestExtractArchiveIgnoresPAXGlobalMetadata(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "pax_global_header")); !os.IsNotExist(err) {
 		t.Fatalf("global PAX metadata materialized as a file: %v", err)
+	}
+}
+
+func TestExtractArchiveHonorsExpiredDeadline(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := extractArchiveContext(ctx, testDir(t), bytes.NewReader(nil)); err != errDeploymentDeadline {
+		t.Fatalf("error=%v", err)
 	}
 }

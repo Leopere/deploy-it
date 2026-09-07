@@ -11,12 +11,17 @@ A deployable repository tracks this root manifest:
   "environment": "production",
   "command": ["./deploy.sh"],
   "env": ["CLOUDFLARE_API_TOKEN"],
-  "timeout_seconds": 900
+  "optional_env": ["GH_CONFIG_DIR"],
+  "timeout_seconds": 300
 }
 ```
 
-The command is executed directly without a shell or interactive stdin from a private snapshot of the exact commit proven on the pushed remote branch and tag. Only a small baseline environment plus the manifest's explicit `env` allowlist is passed. `ship-it` supplies the immutable commit, branch, tag, and remote; the command receives `DEPLOY_IT_COMMIT`, `DEPLOY_IT_BRANCH`, `DEPLOY_IT_TAG`, and `DEPLOY_IT_ENVIRONMENT`.
+The command is executed directly without a shell or interactive stdin from a private snapshot of the exact commit proven on the pushed remote branch, plus the tag when supplied. Only a small baseline environment and explicitly declared variables are passed. Variables in `env` must be set. Variables in `optional_env` are passed only when set; the repository command owns any fallback and validates related inputs. An explicitly empty value remains empty. Both lists reject invalid names, duplicates, and reserved `DEPLOY_IT_` names.
 
-The shipped, tracked contract is the deployment authority; there is no machine-local trust gate. `deploy-it` with no arguments retries the current checkout only when its worktree is clean, `HEAD` is on its configured branch remote, and exactly one release tag points at `HEAD`. Run `deploy-it check` to validate a contract without deploying and `deploy-it install` to install the binary and global skill.
+`deploy-it` resolves the pushed revision, or accepts explicit commit, branch, remote, and optional tag arguments. The command receives `DEPLOY_IT_COMMIT`, `DEPLOY_IT_BRANCH`, `DEPLOY_IT_TAG`, and `DEPLOY_IT_ENVIRONMENT`.
+
+For a command that uses an existing authenticated CLI configuration, declare `HOME` in `env` and any supported configuration overrides in `optional_env`. The command must still verify authentication before deployment.
+
+The shipped, tracked contract is the deployment authority; there is no machine-local trust gate. `deploy-it` with no arguments deploys the current checkout only when its worktree is clean and `HEAD` matches its configured push destination. Release tags are optional. Run `deploy-it check` to validate a contract without deploying and `deploy-it install` to install the binary and global skill.
 
 Copyright © 2026 ColinKnapp.com. All rights reserved.
