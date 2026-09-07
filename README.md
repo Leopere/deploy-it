@@ -22,6 +22,6 @@ The command is executed directly without a shell or interactive stdin from a pri
 
 For a command that uses an existing authenticated CLI configuration, declare `HOME` in `env` and any supported configuration overrides in `optional_env`. The command must still verify authentication before deployment.
 
-The shipped, tracked contract is the deployment authority; there is no machine-local trust gate. `deploy-it` with no arguments deploys the current checkout only when its worktree is clean and `HEAD` matches its configured push destination. Release tags are optional. Run `deploy-it check` to validate a contract without deploying and `deploy-it install` to install the binary and global skill.
+The shipped, tracked contract is the deployment authority; there is no machine-local trust gate. `deploy-it` with no arguments deploys `HEAD` when it matches the branch's configured push destination. Local worktree and index changes do not block deployment or enter the deployment snapshot. Native `ship-it` hooks stage all changes, commit when needed, and push before invoking `deploy-it`. Release tags are optional. Run `deploy-it check` to validate a contract without deploying and `deploy-it install` to install the binary and global skill.
 
 Copyright © 2026 ColinKnapp.com. All rights reserved.

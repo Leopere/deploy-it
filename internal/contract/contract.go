@@ -146,21 +146,13 @@ func (r *Runner) Run(opts Options) (Result, error) {
 	return Result{Environment: manifest.Environment, Elapsed: elapsed}, nil
 }
 
-// ShippedHEADOptions resolves the only safe implicit deployment target: a clean
-// checked-out branch whose HEAD is exactly present at its configured push
+// ShippedHEADOptions resolves a checked-out branch whose HEAD is exactly present at its configured push
 // destination. Tags are optional for explicit calls. Run proves the remote refs
-// immediately before executing the contract.
+// immediately before executing the contract from a private snapshot, independent
+// of local worktree and index changes.
 func (r *Runner) ShippedHEADOptions() (Options, error) {
 	ctx, cancel := r.budget.context()
 	defer cancel()
-	status, err := gitOutput(ctx, r.Root, "status", "--porcelain=v1", "--untracked-files=all")
-	if err != nil {
-		return Options{}, err
-	}
-	if strings.TrimSpace(status) != "" {
-		return Options{}, errors.New("implicit deployment requires a clean worktree")
-	}
-
 	commit, err := r.resolveCommit(ctx, "", false)
 	if err != nil {
 		return Options{}, err

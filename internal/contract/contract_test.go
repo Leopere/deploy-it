@@ -128,9 +128,6 @@ func TestShippedHEADOptionsUsesPushRemoteAndBranch(t *testing.T) {
 
 func TestShippedHEADOptionsRejectsUnsafeInference(t *testing.T) {
 	for name, prepare := range map[string]func(*testing.T, string){
-		"dirty worktree": func(t *testing.T, repo string) {
-			write(t, filepath.Join(repo, "local"), "change\n", 0o644)
-		},
 		"unpushed head": func(t *testing.T, repo string) {
 			write(t, filepath.Join(repo, "local"), "change\n", 0o644)
 			git(t, repo, "add", "local")
@@ -174,7 +171,7 @@ func TestMissingTrustStoreDoesNotBlockDeployment(t *testing.T) {
 	}
 }
 
-func TestSnapshotIgnoresDeletedOrModifiedWorktreeContract(t *testing.T) {
+func TestImplicitSnapshotIgnoresWorktreeAndIndexChanges(t *testing.T) {
 	repo := newRepo(t, true)
 	record := filepath.Join(testDir(t), "record")
 	t.Setenv("DEPLOY_TEST_RECORD", record)
@@ -187,7 +184,17 @@ func TestSnapshotIgnoresDeletedOrModifiedWorktreeContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	write(t, filepath.Join(repo, "deploy.sh"), "#!/bin/sh\nexit 9\n", 0o755)
-	if _, err := runner.Run(Options{Commit: commit, Branch: "main", Remote: "origin"}); err != nil {
+	git(t, repo, "add", "deploy.sh")
+	write(t, filepath.Join(repo, "deploy.sh"), "#!/bin/sh\nexit 10\n", 0o755)
+	write(t, filepath.Join(repo, "untracked"), "local change\n", 0o644)
+	opts, err := runner.ShippedHEADOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.Commit != commit {
+		t.Fatalf("resolved commit = %q, want %q", opts.Commit, commit)
+	}
+	if _, err := runner.Run(opts); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := os.ReadFile(record)
