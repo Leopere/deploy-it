@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "after_ship": true,
+  "environment": "local",
+  "command": ["./jenkins-deployment.py"],
+  "env": ["HOME"],
+  "timeout_seconds": 300
+}

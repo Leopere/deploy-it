@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	maximumDeploymentDuration = 300 * time.Second
+	maximumDeploymentDuration = 30 * time.Minute
 	deadlineReserve           = 5 * time.Second
 )
 

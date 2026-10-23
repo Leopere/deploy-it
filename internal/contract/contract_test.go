@@ -227,7 +227,7 @@ func TestDeploymentBudgetKillsDescendants(t *testing.T) {
 	repo := newRepo(t, true)
 	record := filepath.Join(testDir(t), "descendant-record")
 	t.Setenv("DEPLOY_TEST_RECORD", record)
-	write(t, filepath.Join(repo, ManifestName), strings.Replace(manifest, `"timeout_seconds":30`, `"timeout_seconds":300`, 1), 0o644)
+	write(t, filepath.Join(repo, ManifestName), strings.Replace(manifest, `"timeout_seconds":30`, `"timeout_seconds":1800`, 1), 0o644)
 	write(t, filepath.Join(repo, "deploy.sh"), "#!/bin/sh\n(sleep 1; printf leaked > \"$DEPLOY_TEST_RECORD\") &\nwait\n", 0o755)
 	commitAndPush(t, repo, "contract", "")
 	commit := output(t, repo, "rev-parse", "HEAD")
@@ -258,7 +258,7 @@ func TestManifestStrictnessAndRecursionProtection(t *testing.T) {
 		`{"version":1,"after_ship":true,"environment":"production","command":["./deploy.sh"],"timeout_seconds":30,"surprise":true}`,
 		`{"version":1,"after_ship":false,"environment":"production","command":["./deploy.sh"],"timeout_seconds":30}`,
 		`{"version":1,"after_ship":true,"environment":"production","command":["./deploy.sh"],"timeout_seconds":0}`,
-		`{"version":1,"after_ship":true,"environment":"production","command":["./deploy.sh"],"timeout_seconds":301}`,
+		`{"version":1,"after_ship":true,"environment":"production","command":["./deploy.sh"],"timeout_seconds":1801}`,
 		`{"version":1,"after_ship":true,"environment":"production","command":["./deploy.sh"],"env":["DEPLOY_IT_COMMIT"],"timeout_seconds":30}`,
 		`{"version":1,"after_ship":true,"environment":"production","command":["./deploy.sh"],"timeout_seconds":30} {}`,
 	} {
@@ -268,6 +268,18 @@ func TestManifestStrictnessAndRecursionProtection(t *testing.T) {
 	}
 	if _, err := validateExecutable(testDir(t), "./ship.sh"); err == nil || !strings.Contains(err.Error(), "must not invoke ship-it") {
 		t.Fatalf("recursion error=%v", err)
+	}
+}
+
+func TestManifestTimeoutBoundary(t *testing.T) {
+	valid := `{"version":1,"after_ship":true,"environment":"production","command":["./deploy.sh"],"timeout_seconds":1800}`
+	if _, err := decodeManifest([]byte(valid)); err != nil {
+		t.Fatalf("rejected 1800-second timeout: %v", err)
+	}
+
+	aboveMaximum := strings.Replace(valid, `"timeout_seconds":1800`, `"timeout_seconds":1801`, 1)
+	if _, err := decodeManifest([]byte(aboveMaximum)); err == nil || !strings.Contains(err.Error(), "between 1 and 1800") {
+		t.Fatalf("accepted 1801-second timeout or reported the wrong boundary: %v", err)
 	}
 }
 

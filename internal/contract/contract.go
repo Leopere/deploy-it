@@ -48,10 +48,11 @@ type Result struct {
 }
 
 type Runner struct {
-	Root   string
-	Out    io.Writer
-	Err    io.Writer
-	budget deploymentBudget
+	Root          string
+	Out           io.Writer
+	Err           io.Writer
+	budget        deploymentBudget
+	beforeCommand func() error
 }
 
 func Open(cwd string, out, errOut io.Writer) (*Runner, error) {
@@ -131,6 +132,11 @@ func (r *Runner) Run(opts Options) (Result, error) {
 	cmd.Stdout = r.Out
 	cmd.Stderr = r.Err
 	cmd.Env = environment
+	if r.beforeCommand != nil {
+		if err := r.beforeCommand(); err != nil {
+			return Result{}, err
+		}
+	}
 	err = cmd.Run()
 	elapsed := time.Since(started)
 	if commandCtx.Err() == context.DeadlineExceeded {
@@ -151,6 +157,14 @@ func (r *Runner) Run(opts Options) (Result, error) {
 // immediately before executing the contract from a private snapshot, independent
 // of local worktree and index changes.
 func (r *Runner) ShippedHEADOptions() (Options, error) {
+	return r.headOptions(true)
+}
+
+// HeadOptions resolves local push metadata without waiting on the remote.
+// The detached worker proves the exact remote revision before executing.
+func (r *Runner) HeadOptions() (Options, error) { return r.headOptions(false) }
+
+func (r *Runner) headOptions(prove bool) (Options, error) {
 	ctx, cancel := r.budget.context()
 	defer cancel()
 	commit, err := r.resolveCommit(ctx, "", false)
@@ -190,8 +204,10 @@ func (r *Runner) ShippedHEADOptions() (Options, error) {
 		return Options{}, errors.New("implicit deployment requires a configured branch push destination")
 	}
 	opts := Options{Commit: commit, Branch: strings.TrimPrefix(parts[1], "refs/heads/"), Remote: parts[0]}
-	if err := r.proveRemoteRevision(ctx, opts.Remote, opts.Branch, "", commit); err != nil {
-		return Options{}, err
+	if prove {
+		if err := r.proveRemoteRevision(ctx, opts.Remote, opts.Branch, "", commit); err != nil {
+			return Options{}, err
+		}
 	}
 	return opts, nil
 }
@@ -409,6 +425,8 @@ func commandEnvironment(manifest Manifest, commit string, opts Options, hardDead
 		"DEPLOY_IT_BRANCH="+opts.Branch,
 		"DEPLOY_IT_TAG="+opts.Tag,
 		"DEPLOY_IT_ENVIRONMENT="+manifest.Environment,
+		"DEPLOY_IT_OPERATION_ID="+os.Getenv("DEPLOY_IT_OPERATION_ID"),
+		"DEPLOY_IT_RECEIPT_FILE="+os.Getenv("DEPLOY_IT_RECEIPT_FILE"),
 		"SHIP_IT_DEADLINE_UNIX_MS="+hardDeadlineMS,
 	)
 	return environment, nil
