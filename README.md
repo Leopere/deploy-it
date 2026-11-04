@@ -18,6 +18,8 @@ A deployable repository tracks this root manifest:
 
 The command is executed directly without a shell or interactive stdin from a private snapshot of the exact commit proven on the pushed remote branch, plus the tag when supplied. Only a small baseline environment and explicitly declared variables are passed. Variables in `env` must be set. Variables in `optional_env` are passed only when set; the repository command owns any fallback and validates related inputs. An explicitly empty value remains empty. Both lists reject invalid names, duplicates, and reserved `DEPLOY_IT_` names.
 
+`revision_policy` defaults to `exact_tip`. Configuration installers that can safely apply a frozen patch after another push can set it to `branch_ancestor`. This fetches the configured remote branch into a private proof ref and requires the selected commit to be its ancestor. The command still runs from that commit's snapshot, and an optional tag must still match that exact commit.
+
 `deploy-it` resolves the pushed revision, or accepts explicit commit, branch, remote, and optional tag arguments. The command receives `DEPLOY_IT_COMMIT`, `DEPLOY_IT_BRANCH`, `DEPLOY_IT_TAG`, and `DEPLOY_IT_ENVIRONMENT`.
 
 Normal no-argument and explicit deploy calls enqueue a durable operation and return its handle; they do not wait for Jenkins or live acceptance. Operation records and logs are kept under `~/.local/state/deploy-it/operations`, or under `DEPLOY_IT_STATE_DIR` when set. The operation ID is stable for a repository, environment, and commit. Workers survive the invoking hook, and operations targeting the same environment are serialized.
@@ -28,7 +30,7 @@ An interrupted or failed operation is not submitted again automatically. Check i
 
 For a command that uses an existing authenticated CLI configuration, declare `HOME` in `env` and any supported configuration overrides in `optional_env`. The command must still verify authentication before deployment.
 
-The shipped, tracked contract is the deployment authority; there is no machine-local trust gate. `deploy-it` with no arguments enqueues `HEAD` when it matches the branch's configured push destination. Local worktree and index changes do not block deployment or enter the deployment snapshot. Native `ship-it` hooks stage all changes, commit when needed, and push before invoking `deploy-it`. Release tags are optional. Run `deploy-it check` to validate a contract without deploying and `deploy-it install` to install the binary and global skill.
+The shipped, tracked contract is the deployment authority; there is no machine-local trust gate. `deploy-it` with no arguments enqueues `HEAD` using the committed revision policy and the branch's configured push destination. Local worktree and index changes do not block deployment or enter the deployment snapshot. The working agent commits and normal-pushes completed work, then invokes `deploy-it` during the active turn. Release tags are optional. Run `deploy-it check` to validate a contract without deploying and `deploy-it install` to install the binary and global skill.
 
 Use `deploy-it --wait` to enqueue and observe the final repository command result, or `deploy-it wait HANDLE` to observe an existing operation. Stopping a waiter leaves the detached command running. `deploy-it retry HANDLE` retries only failures whose durable record proves the repository command never started. Each retry keeps the previous attempt receipt. Once a command may have run, reconcile the existing Jenkins operation and target through the repository’s recovery path.
 

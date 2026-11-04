@@ -7,11 +7,13 @@ description: Deploy an already-shipped Git revision through the compiled deploy-
 
 # Deploy It
 
-For an authorized destination, complete the requested change and its focused checks. Prepare the repository command to deploy that change and check the live result. Native ` + "`ship-it`" + ` hooks push the revision, then invoke ` + "`deploy-it`" + ` for repositories with a tracked deployment contract.
+For an authorized destination, complete the requested change and its focused checks. Prepare the repository command to deploy that change and check the live result. The working agent commits and normal-pushes completed work during the active turn, then invokes ` + "`deploy-it`" + ` for repositories with a tracked deployment contract.
 
 Jenkins owns build, test, publication, deployment, and live acceptance. ` + "`deploy-it`" + ` submits or observes the exact pushed revision; it does not build, publish, or activate a release locally. Migrate existing GitHub Actions responsibilities to Jenkins and verify the replacement before removing the old workflow.
 
-A root ` + "`.deploy-it.json`" + ` declares version 1, ` + "`after_ship: true`" + `, environment, literal repository command argv, environment-variable allowlist, and a 1–1800 second timeout. The command runs without interactive stdin from a private snapshot of the exact pushed commit. It receives ` + "`DEPLOY_IT_COMMIT`" + `, ` + "`DEPLOY_IT_BRANCH`" + `, ` + "`DEPLOY_IT_TAG`" + `, and ` + "`DEPLOY_IT_ENVIRONMENT`" + `. An explicit tag is optional. The no-argument invocation resolves the branch's configured push destination and needs no release tag. Local worktree and index changes do not block deployment or enter the snapshot. Native ship-it hooks stage all changes, commit when needed, and push before invoking deploy-it.
+A root ` + "`.deploy-it.json`" + ` declares version 1, ` + "`after_ship: true`" + `, environment, literal repository command argv, environment-variable allowlist, and a 1–1800 second timeout. The command runs without interactive stdin from a private snapshot of the exact pushed commit. It receives ` + "`DEPLOY_IT_COMMIT`" + `, ` + "`DEPLOY_IT_BRANCH`" + `, ` + "`DEPLOY_IT_TAG`" + `, and ` + "`DEPLOY_IT_ENVIRONMENT`" + `. An explicit tag is optional. The no-argument invocation resolves the branch's configured push destination and needs no release tag. Local worktree and index changes do not block deployment or enter the snapshot. Commit and normal-push before invoking deploy-it; do not wait for a Stop hook.
+
+The optional ` + "`revision_policy`" + ` field defaults to ` + "`exact_tip`" + `. Configuration installers can explicitly select ` + "`branch_ancestor`" + ` to prove that the frozen commit remains in the freshly fetched configured branch after another push. The policy comes from that exact commit, and optional tags still bind the exact commit. Repository commands retain their deployment and acceptance checks.
 
 The tracked contract is the deployment authority; there is no machine-local trust gate. Never guess a production target. Read existing project configuration and the user's destination to create or repair a missing command. A missing manifest is setup work when the target is known. Ask only when the destination or required access cannot be established from available evidence. Use ` + "`deploy-it check`" + ` for contract validation without deployment.
 
@@ -31,5 +33,5 @@ Copyright © 2026 ColinKnapp.com. All rights reserved.
 const OpenAIYAML = `interface:
   display_name: "Deploy It"
   short_description: "Deploy shipped revisions through one contract"
-  default_prompt: "Use $deploy-it to deploy the revision that ship-it just shipped."
+  default_prompt: "Use $deploy-it to deploy the exact revision that was committed and pushed."
 `

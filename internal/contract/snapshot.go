@@ -26,7 +26,7 @@ func materialize(ctx context.Context, repoRoot, commit, hardDeadlineMS string) (
 		return "", nil, err
 	}
 	cleanup := func() { _ = os.RemoveAll(dir) }
-	cmd := newBoundedCommand(ctx, "git", "-C", repoRoot, "archive", "--format=tar", commit)
+	cmd := newBoundedCommand(ctx, "git", "--no-replace-objects", "-C", repoRoot, "archive", "--format=tar", commit)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		cleanup()
@@ -34,7 +34,7 @@ func materialize(ctx context.Context, repoRoot, commit, hardDeadlineMS string) (
 	}
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "SHIP_IT_DEADLINE_UNIX_MS="+hardDeadlineMS)
+	cmd.Env = gitEnvironment("SHIP_IT_DEADLINE_UNIX_MS=" + hardDeadlineMS)
 	if err := cmd.Start(); err != nil {
 		cleanup()
 		return "", nil, err
@@ -53,6 +53,10 @@ func materialize(ctx context.Context, repoRoot, commit, hardDeadlineMS string) (
 		}
 		cleanup()
 		return "", nil, fmt.Errorf("materialize shipped commit: %s: %w", strings.TrimSpace(stderr.String()), err)
+	}
+	if err := deadlineError(ctx); err != nil {
+		cleanup()
+		return "", nil, err
 	}
 	return dir, cleanup, nil
 }

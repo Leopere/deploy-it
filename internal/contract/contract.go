@@ -3,6 +3,7 @@ package contract
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -30,6 +31,7 @@ type Manifest struct {
 	Command        []string `json:"command"`
 	Env            []string `json:"env,omitempty"`
 	OptionalEnv    []string `json:"optional_env,omitempty"`
+	RevisionPolicy string   `json:"revision_policy,omitempty"`
 	TimeoutSeconds int      `json:"timeout_seconds"`
 }
 
@@ -110,7 +112,7 @@ func (r *Runner) Run(opts Options) (Result, error) {
 		fmt.Fprintf(r.Out, "Deployment contract valid for %s at %s.\n", manifest.Environment, short(commit))
 		return Result{Environment: manifest.Environment}, nil
 	}
-	if err := r.proveRemoteRevision(ctx, opts.Remote, opts.Branch, opts.Tag, commit); err != nil {
+	if err := r.proveRemoteRevision(ctx, opts.Remote, opts.Branch, opts.Tag, commit, manifest.RevisionPolicy); err != nil {
 		return Result{}, err
 	}
 	environment, err := commandEnvironment(manifest, commit, opts, r.budget.hardMS)
@@ -152,8 +154,8 @@ func (r *Runner) Run(opts Options) (Result, error) {
 	return Result{Environment: manifest.Environment, Elapsed: elapsed}, nil
 }
 
-// ShippedHEADOptions resolves a checked-out branch whose HEAD is exactly present at its configured push
-// destination. Tags are optional for explicit calls. Run proves the remote refs
+// ShippedHEADOptions resolves a checked-out branch whose HEAD satisfies the
+// committed revision policy at its configured push destination. Tags are optional for explicit calls. Run proves the remote refs
 // immediately before executing the contract from a private snapshot, independent
 // of local worktree and index changes.
 func (r *Runner) ShippedHEADOptions() (Options, error) {
@@ -205,7 +207,23 @@ func (r *Runner) headOptions(prove bool) (Options, error) {
 	}
 	opts := Options{Commit: commit, Branch: strings.TrimPrefix(parts[1], "refs/heads/"), Remote: parts[0]}
 	if prove {
-		if err := r.proveRemoteRevision(ctx, opts.Remote, opts.Branch, "", commit); err != nil {
+		policy := ""
+		present, err := r.pathAtCommit(ctx, commit, ManifestName)
+		if err != nil {
+			return Options{}, err
+		}
+		if present {
+			data, err := gitOutput(ctx, r.Root, "show", commit+":"+ManifestName)
+			if err != nil {
+				return Options{}, err
+			}
+			manifest, err := decodeManifest([]byte(data))
+			if err != nil {
+				return Options{}, err
+			}
+			policy = manifest.RevisionPolicy
+		}
+		if err := r.proveRemoteRevision(ctx, opts.Remote, opts.Branch, "", commit, policy); err != nil {
 			return Options{}, err
 		}
 	}
@@ -251,6 +269,9 @@ func decodeManifest(data []byte) (Manifest, error) {
 	}
 	if !manifest.AfterShip {
 		return Manifest{}, fmt.Errorf("invalid %s: after_ship must be true", ManifestName)
+	}
+	if err := validateRevisionPolicy(manifest.RevisionPolicy); err != nil {
+		return Manifest{}, err
 	}
 	if !environmentRE.MatchString(manifest.Environment) {
 		return Manifest{}, fmt.Errorf("invalid %s: environment is required and must be a simple name", ManifestName)
@@ -346,8 +367,20 @@ func (r *Runner) pathAtCommit(ctx context.Context, commit, path string) (bool, e
 	return strings.TrimSpace(out) == path, nil
 }
 
-func (r *Runner) proveRemoteRevision(ctx context.Context, remote, branch, tag, commit string) error {
+func validateRevisionPolicy(policy string) error {
+	switch policy {
+	case "", "exact_tip", "branch_ancestor":
+		return nil
+	default:
+		return fmt.Errorf("invalid %s: revision_policy must be exact_tip or branch_ancestor", ManifestName)
+	}
+}
+
+func (r *Runner) proveRemoteRevision(ctx context.Context, remote, branch, tag, commit, policy string) error {
 	if err := deadlineError(ctx); err != nil {
+		return err
+	}
+	if err := validateRevisionPolicy(policy); err != nil {
 		return err
 	}
 	if !remoteRE.MatchString(remote) {
@@ -360,15 +393,21 @@ func (r *Runner) proveRemoteRevision(ctx context.Context, remote, branch, tag, c
 		return errors.New("invalid shipped branch")
 	}
 	branchRef := "refs/heads/" + branch
-	branchOut, err := gitOutput(ctx, r.Root, "ls-remote", "--exit-code", remote, branchRef)
-	if err != nil {
-		if deadlineError(ctx) != nil {
-			return errDeploymentDeadline
+	if policy == "branch_ancestor" {
+		if err := r.proveBranchAncestor(ctx, remote, branchRef, commit); err != nil {
+			return err
 		}
-		return errors.New("deployment commit is not the exact commit on the pushed remote branch")
-	}
-	if !remoteOutputHas(branchOut, branchRef, commit) {
-		return errors.New("deployment commit is not the exact commit on the pushed remote branch")
+	} else {
+		branchOut, err := gitOutput(ctx, r.Root, "ls-remote", "--exit-code", remote, branchRef)
+		if err != nil {
+			if deadlineError(ctx) != nil {
+				return errDeploymentDeadline
+			}
+			return errors.New("deployment commit is not the exact commit on the pushed remote branch")
+		}
+		if !remoteOutputHas(branchOut, branchRef, commit) {
+			return errors.New("deployment commit is not the exact commit on the pushed remote branch")
+		}
 	}
 	if tag == "" {
 		return nil
@@ -387,6 +426,37 @@ func (r *Runner) proveRemoteRevision(ctx context.Context, remote, branch, tag, c
 	if !remoteOutputHas(tagOut, tagRef, commit) {
 		return errors.New("deployment commit is not the exact commit at the pushed remote tag")
 	}
+	return nil
+}
+
+func (r *Runner) proveBranchAncestor(ctx context.Context, remote, branchRef, commit string) error {
+	// Never derive authority from a mutable tracking ref or FETCH_HEAD. Each
+	// proof has its own append-only ref, fetched directly from this remote branch.
+	nonce := make([]byte, 16)
+	if _, err := rand.Read(nonce); err != nil {
+		return fmt.Errorf("create branch proof ref: %w", err)
+	}
+	proofRef := "refs/deploy-it/proof/" + hex.EncodeToString(nonce)
+	if _, err := gitOutput(ctx, r.Root, "remote", "get-url", remote); err != nil {
+		return fmt.Errorf("branch ancestry proof requires a configured remote: %w", err)
+	}
+	if _, err := gitOutput(ctx, r.Root, "fetch", "--no-tags", "--no-write-fetch-head", "--no-recurse-submodules", "--refmap=", remote, branchRef+":"+proofRef); err != nil {
+		if errors.Is(err, errDeploymentDeadline) {
+			return errDeploymentDeadline
+		}
+		// Fetch stderr can contain the configured URL. Keep this authority
+		// failure free of endpoint credentials and transport output.
+		return errors.New("cannot freshly fetch pushed remote branch for ancestry proof")
+	}
+	tip, err := gitOutput(ctx, r.Root, "rev-parse", "--verify", proofRef+"^{commit}")
+	if err != nil {
+		return fmt.Errorf("read fetched branch proof: %w", err)
+	}
+	tip = strings.TrimSpace(tip)
+	if _, err := gitOutput(ctx, r.Root, "merge-base", "--is-ancestor", commit, tip); err != nil {
+		return fmt.Errorf("deployment commit is not an ancestor of the pushed remote branch: %w", err)
+	}
+	fmt.Fprintf(r.Out, "Proven remote branch %s/%s at %s contains deployment commit %s.\n", remote, strings.TrimPrefix(branchRef, "refs/heads/"), tip, commit)
 	return nil
 }
 
@@ -445,17 +515,38 @@ func gitOutput(ctx context.Context, cwd string, args ...string) (string, error) 
 	if err := deadlineError(ctx); err != nil {
 		return "", err
 	}
-	cmd := newBoundedCommand(ctx, "git", append([]string{"-C", cwd}, args...)...)
+	cmd := newBoundedCommand(ctx, "git", append([]string{"--no-replace-objects", "-C", cwd}, args...)...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = gitEnvironment()
 	if err := cmd.Run(); err != nil {
 		if deadlineError(ctx) != nil {
 			return stdout.String(), errDeploymentDeadline
 		}
 		return stdout.String(), fmt.Errorf("git %s: %s: %w", strings.Join(args, " "), strings.TrimSpace(stderr.String()), err)
 	}
+	if err := deadlineError(ctx); err != nil {
+		return stdout.String(), err
+	}
 	return stdout.String(), nil
+}
+
+// Filter inherited duplicates before overriding authority-sensitive Git values.
+// --no-replace-objects and an empty graft file keep both graph proof and archive
+// content bound to the actual object IDs, independent of local history overlays.
+func gitEnvironment(extra ...string) []string {
+	overrides := append([]string{"GIT_TERMINAL_PROMPT=0", "GIT_GRAFT_FILE=" + os.DevNull}, extra...)
+	keys := make(map[string]bool, len(overrides))
+	for _, value := range overrides {
+		keys[strings.SplitN(value, "=", 2)[0]] = true
+	}
+	environment := make([]string, 0, len(os.Environ())+len(overrides))
+	for _, value := range os.Environ() {
+		if !keys[strings.SplitN(value, "=", 2)[0]] {
+			environment = append(environment, value)
+		}
+	}
+	return append(environment, overrides...)
 }
 
 func short(commit string) string {
