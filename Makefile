@@ -1,10 +1,4 @@
-.PHONY: test build install
+.PHONY: test
 
 test:
 	go test ./...
-
-build:
-	go build -trimpath -o deploy-it ./cmd/deploy-it
-
-install: build
-	./deploy-it install
